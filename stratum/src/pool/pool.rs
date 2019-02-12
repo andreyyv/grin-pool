@@ -62,7 +62,6 @@ fn accept_workers(
                         let mut worker = Worker::new(0, BufStream::new(stream));
                         worker.set_difficulty(difficulty);
                         let initial_id = rng.gen::<u32>();
-                        thread::sleep(time::Duration::from_secs(5));
                         workers.lock().unwrap().insert(initial_id.to_string(), worker);
                         // The new worker is now added to the workers list
                     }
@@ -107,7 +106,7 @@ impl Pool {
             job: JobTemplate::new(),
             config: config.clone(),
             server: Server::new(config.clone()),
-            difficulty: 5,
+            difficulty: 1,
             workers: Arc::new(Mutex::new(HashMap::new())),
             duplicates: HashMap::new(),
         }
@@ -164,7 +163,7 @@ impl Pool {
             // Delete workers in error state
             let _num_active_workers = self.clean_workers();
 
-            thread::sleep(time::Duration::from_millis(1));
+            thread::sleep(time::Duration::from_millis(10));
         }
     }
 
@@ -204,7 +203,7 @@ impl Pool {
                 // User id changed - probably because they logged in
                 id_changed.push(worker_id.clone());
                 debug!( LOGGER, "id changed:  full_id {} - {:?}", worker.full_id().clone(), res );
-                worker.set_block_status(self.job.height, self.difficulty);
+                worker.reset_worker_shares(self.job.height, self.difficulty);
             }
         }
         // Rehash the worker using updated id
@@ -229,8 +228,8 @@ impl Pool {
                 worker.set_difficulty(self.difficulty);
                 worker.set_height(self.job.height);
                 // Print this workers block_status for logstash to send to rmq
-                error!(LOGGER, "{:?}", worker.block_status);
-                worker.set_block_status(self.job.height, self.difficulty);
+                error!(LOGGER, "{:?}", worker.worker_shares);
+                worker.reset_worker_shares(self.job.height, self.difficulty);
                 worker.send_job(&mut self.server.job.clone());
             }
         }
@@ -268,7 +267,7 @@ impl Pool {
                                 worker.login(),
                             );
                             worker.status.rejected += 1;
-                            worker.block_status.rejected += 1;
+                            worker.add_shares(share.edge_bits, 0, 1, 0); // Accepted, Rejected, Stale
                             continue; // Dont process this share anymore
                         } else {
                             self.duplicates.insert(share.pow.clone(), worker.id());
@@ -294,7 +293,7 @@ impl Pool {
                             // Its stale
                             warn!(LOGGER, "Share is stale {} vs {}", share.height, self.job.height);
                             worker.status.stale += 1;
-                            worker.block_status.stale += 1;
+                            worker.add_shares(share.edge_bits, 0, 0, 1); // Accepted, Rejected, Stale
                             worker.send_err("submit".to_string(), "Solution submitted too late".to_string(), -32503);
                             continue; // Dont process this share anymore
                         }
@@ -308,19 +307,19 @@ impl Pool {
                         // Check if this meets worker difficulty
                         if difficulty < 1 {
                             worker.status.rejected += 1;
-                            worker.block_status.rejected += 1;
+                            worker.add_shares(share.edge_bits, 0, 1, 0); // Accepted, Rejected, Stale
                             worker.send_err("submit".to_string(), "Rejected low difficulty solution".to_string(), -32502);
                             continue; // Dont process this share anymore
                         }
                         if difficulty < worker.status.difficulty {
                             worker.status.rejected += 1;
-                            worker.block_status.rejected += 1;
+                            worker.add_shares(share.edge_bits, 0, 1, 0); // Accepted, Rejected, Stale
                             worker.send_err("submit".to_string(), "Failed to validate solution".to_string(), -32502);
                             continue; // Dont process this share anymore
                         }
                         if difficulty >= worker.status.difficulty {
                             worker.status.accepted += 1;
-                            worker.block_status.accepted += 1;
+                            worker.add_shares(share.edge_bits, 1, 0, 0); // Accepted, Rejected, Stale
                             worker.send_ok("submit".to_string());
                         }
                         // This is a good share, send it to grin server to be submitted
@@ -353,12 +352,12 @@ impl Pool {
         // XXX TODO: need to set a unique timestamp and record it in the worker struct
         for (worker_id, worker) in w_m.iter_mut() {
             if worker.authenticated {
-                worker.set_difficulty(5); // XXX TODO: this get from config?
+                worker.set_difficulty(1); // XXX TODO: this get from config?
                 worker.set_height(self.job.height);
                 // Print this workers block_status for logstash to send to rmq
-                error!(LOGGER, "{:?}", worker.block_status);
+                error!(LOGGER, "{:?}", worker.worker_shares);
                 worker.send_job(&mut self.job.clone());
-                worker.set_block_status(self.job.height, self.difficulty);
+                worker.reset_worker_shares(self.job.height, self.difficulty);
             }
         }
         return Ok(());
